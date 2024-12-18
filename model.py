@@ -86,44 +86,53 @@ class SASRec(torch.nn.Module):
             seqs = self.forward_layers[i](seqs)
 
         return seqs
-
+    def reg_loss(self):
+        l2_reg = self.item_emb.weight.norm(2)
+        return l2_reg
     def left(self, log_seqs):
         F = self.log2feats(log_seqs)  # 사용자 시퀀스 특징
         batch_size, seq_len, d = F.shape  # F: (batch_size, seq_len, d)
-
-        FF = torch.bmm(F.permute(0, 2, 1), F)  # F^a_t,k @ F^a_t,l -> (batch, d, d)
+        FF = F.unsqueeze(2) * F.unsqueeze(3)
+        FF = FF.sum(dim=1)
         E = self.item_emb.weight  # 아이템 임베딩 (num_items, d)
-        EE = torch.mm(E.t(), E)  # E_i,k @ E_i,l -> (d, d)
+        EE = E.unsqueeze(2) * E.unsqueeze(1)  # E_i,k @ E_i,l -> (d, d)
+        EE = EE.sum(dim=0)  # sum over items
         c = 0.001  # 가중치 스칼라 값, 예시로 사용
+        cEE = c * EE 
+        
+        hh = torch.matmul(self.prediction.weight.t(), self.prediction.weight) 
+        left = FF @ (cEE) @ hh  # 계산 순서: FF @ EE @ hh
+        left = left.sum(dim=-1)
+        left = left.sum(dim=-1)
+        #left == (batch_size,1)
+        return left, F
 
-        hh = torch.matmul(self.prediction.weight.t(), self.prediction.weight) # h_k h_l -> (d,)
-        left = FF @ (c * EE) @ hh  # 계산 순서: FF @ EE @ hh
-        left = left.sum(dim=(1,2))  # 배치별로 합산
-
-        return left.mean()
-
-    def right(self, log_seqs, pos_seqs):
-        F = self.log2feats(log_seqs)
+    def right(self, F, pos_seqs): #batch, seq, dim
         pos_seqs = self.item_emb(torch.LongTensor(pos_seqs).to(self.dev))  # 아이템 임베딩 (pos_seqs)
-        R_hat = F * pos_seqs  # R_hat: (batch, seq, seq)  # R_hat: (batch, seq)
-        R_hat = self.prediction(R_hat).squeeze(2)  # R_hat: (batch, seq, 1)
+        
+        pu = F.transpose(1, 2)
+        qi = pos_seqs.transpose(1, 2)
+        ht = self.prediction.weight
+        R_hat = ht @ (pu * qi)
         c = 0.001  # 가중치 스칼라 값
         right = (1 - c) * (R_hat**2) - (2 * R_hat)  # 수식 그대로 적용
-        right = right.sum(dim=1)  # 배치별 합산
-        return right.mean()
+        right = right.sum(dim=-1)
+        right = right.sum(dim=-1)
+        return right
 
     def forward(self, user_ids, log_seqs, pos_seqs):
         # 첫 번째 항 (left) 계산
-        left = self.left(log_seqs)
+        left, F = self.left(log_seqs)
 
         # 두 번째 항 (right) 계산
-        right = self.right(log_seqs, pos_seqs)
-        
+        right = self.right(F, pos_seqs)
+        loss = left + right
+        #loss = loss.mean()
         # 세 번째 항: 정규화
-        reg_loss = sum(torch.norm(param, p=2) for param in self.parameters())
+        reg_loss = self.reg_loss()
         # 최종 손실
-        loss = left + right + 0.0001 * reg_loss
-        return loss
+        loss = loss + 0.0001 * reg_loss
+        return loss.mean()
         
 
     def predict(self, user_ids, log_seqs, item_indices): # for inference
@@ -134,7 +143,8 @@ class SASRec(torch.nn.Module):
         item_embs = self.item_emb(torch.LongTensor(item_indices).to(self.dev)) # (U, I, C)
 
         logits = item_embs*final_feat
-        logits = self.prediction(logits)
+        logits = self.prediction(logits).squeeze(1).unsqueeze(0) # (U, I) #
+
         # preds = self.pos_sigmoid(logits) # rank same item list for different users
 
         return logits # preds # (U, I)

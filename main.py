@@ -22,7 +22,7 @@ parser.add_argument('--num_blocks', default=1, type=int)
 parser.add_argument('--num_epochs', default=1000, type=int)
 parser.add_argument('--num_heads', default=1, type=int)
 parser.add_argument('--dropout_rate', default=0.2, type=float)
-parser.add_argument('--l2_emb', default=0.01, type=float)
+parser.add_argument('--l2_emb', default=0.001, type=float)
 parser.add_argument('--device', default='cuda', type=str)
 parser.add_argument('--inference_only', default=False, type=str2bool)
 parser.add_argument('--state_dict_path', default=None, type=str)
@@ -108,11 +108,12 @@ if __name__ == '__main__':
             u, seq, pos = np.array(u), np.array(seq), np.array(pos) #seq = query, pos = answer e.g) seq[t] = pos[t-1] 
             adam_optimizer.zero_grad()
             loss = model(u, seq, pos)
+            
             loss.backward()
             adam_optimizer.step()
             print("loss in epoch {} iteration {}: {}".format(epoch, step, loss.item())) # expected 0.4~0.6 after init few epochs
 
-        if epoch % 1 == 0:
+        if epoch % 20 == 0:
             model.eval()
             t1 = time.time() - t0
             T += t1
