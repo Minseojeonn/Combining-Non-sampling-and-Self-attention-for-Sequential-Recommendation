@@ -7,16 +7,22 @@ class PointWiseFeedForward(torch.nn.Module):
 
         super(PointWiseFeedForward, self).__init__()
 
-        self.conv1 = torch.nn.Conv1d(hidden_units, hidden_units, kernel_size=1)
-        self.dropout1 = torch.nn.Dropout(p=dropout_rate)
+        self.FC1 = torch.nn.Linear(hidden_units, hidden_units)
+        #self.LayerNorm = torch.nn.LayerNorm(hidden_units, eps=1e-8)
         self.relu = torch.nn.ReLU()
-        self.conv2 = torch.nn.Conv1d(hidden_units, hidden_units, kernel_size=1)
-        self.dropout2 = torch.nn.Dropout(p=dropout_rate)
-
+        self.FC2 = torch.nn.Linear(hidden_units, hidden_units)
+        self.LayerNorm2 = torch.nn.LayerNorm(hidden_units, eps=1e-8)
+        self.bias1 = torch.nn.Parameter(torch.zeros((1, hidden_units)))
+        self.bias2 = torch.nn.Parameter(torch.zeros((1, hidden_units)))
+        self.bias1 = torch.nn.init.xavier_normal_(self.bias1)
+        self.bias2 = torch.nn.init.xavier_normal_(self.bias2)
+        self.bias1.requires_grad = True
+        self.bias2.requires_grad = True
+        
     def forward(self, inputs):
-        outputs = self.dropout2(self.conv2(self.relu(self.dropout1(self.conv1(inputs.transpose(-1, -2))))))
-        outputs = outputs.transpose(-1, -2) # as Conv1D requires (N, C, Length)
-        outputs += inputs
+        outputs = self.relu(self.FC1(inputs)+self.bias1)
+        outputs = self.FC2(outputs) + self.bias2 + self.LayerNorm2(inputs) 
+        
         return outputs
 
 # pls use the following self-made multihead attention layer
@@ -58,12 +64,10 @@ class SASRec(torch.nn.Module):
             new_fwd_layer = PointWiseFeedForward(args.hidden_units, args.dropout_rate)
             self.forward_layers.append(new_fwd_layer)
 
-            # self.pos_sigmoid = torch.nn.Sigmoid()
-            # self.neg_sigmoid = torch.nn.Sigmoid()
 
     def log2feats(self, log_seqs): # TODO: fp64 and int64 as default in python, trim?
         seqs = self.item_emb(torch.LongTensor(log_seqs).to(self.dev))
-        #seqs *= self.item_emb.embedding_dim ** 0.5
+        seqs *= self.item_emb.embedding_dim ** 0.5
         poss = np.tile(np.arange(1, log_seqs.shape[1] + 1), [log_seqs.shape[0], 1])
         # TODO: directly do tensor = torch.arange(1, xxx, device='cuda') to save extra overheads
         poss *= (log_seqs != 0)
@@ -131,20 +135,22 @@ class SASRec(torch.nn.Module):
         # 세 번째 항: 정규화
         reg_loss = self.reg_loss()
         # 최종 손실
-        loss = loss + 0.0001 * reg_loss
+        loss = loss + 0.01 * reg_loss
         return loss.mean()
         
 
     def predict(self, user_ids, log_seqs, item_indices): # for inference
         log_feats = self.log2feats(log_seqs) # user_ids hasn't been used yet
-
         final_feat = log_feats[:, -1, :] # only use last QKV classifier, a waste
-
         item_embs = self.item_emb(torch.LongTensor(item_indices).to(self.dev)) # (U, I, C)
-
-        logits = item_embs*final_feat
-        logits = self.prediction(logits).squeeze(1).unsqueeze(0) # (U, I) #
+        pu = final_feat.t()
+        qi = item_embs.t()
+        ht = self.prediction.weight
+        
+        R_hat = ht @ (pu * qi)
+        #logits = item_embs*final_feat
+        #logits = self.prediction(logits).squeeze(1).unsqueeze(0) # (U, I) #
 
         # preds = self.pos_sigmoid(logits) # rank same item list for different users
 
-        return logits # preds # (U, I)
+        return R_hat # preds # (U, I)

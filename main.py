@@ -14,8 +14,8 @@ def str2bool(s):
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', required=True)
 parser.add_argument('--train_dir', required=True)
-parser.add_argument('--batch_size', default=1024, type=int)
-parser.add_argument('--lr', default=0.01, type=float)
+parser.add_argument('--batch_size', default=128, type=int)
+parser.add_argument('--lr', default=0.001, type=float)
 parser.add_argument('--maxlen', default=200, type=int)
 parser.add_argument('--hidden_units', default=50, type=int)
 parser.add_argument('--num_blocks', default=1, type=int)
@@ -31,8 +31,7 @@ parser.add_argument('--state_dict_path', default=None, type=str)
 
 
 args = parser.parse_args()
-if args.num_blocks != 1:
-    raise ValueError('num_blocks should be 1')
+
 if not os.path.isdir(args.dataset + '_' + args.train_dir):
     os.makedirs(args.dataset + '_' + args.train_dir)
 with open(os.path.join(args.dataset + '_' + args.train_dir, 'args.txt'), 'w') as f:
@@ -66,7 +65,7 @@ if __name__ == '__main__':
         except:
             pass # just ignore those failed init layers
 
-    model.pos_emb.weight.data[0, :] = 0
+    model.item_emb.weight.data[0, :] = 0
     model.item_emb.weight.data[0, :] = 0
 
     # this fails embedding init 'Embedding' object has no attribute 'dim'
@@ -113,7 +112,7 @@ if __name__ == '__main__':
             adam_optimizer.step()
             print("loss in epoch {} iteration {}: {}".format(epoch, step, loss.item())) # expected 0.4~0.6 after init few epochs
 
-        if epoch % 20 == 0:
+        if epoch % 3 == 0:
             model.eval()
             t1 = time.time() - t0
             T += t1

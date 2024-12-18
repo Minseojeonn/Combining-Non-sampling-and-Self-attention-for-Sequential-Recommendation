@@ -150,19 +150,18 @@ def evaluate(model, dataset, args):
         rated = set(train[u])
         rated.add(0)
         item_idx = [test[u][0]]
-        for _ in range(100):
+        for _ in range(1000):
             t = np.random.randint(1, itemnum + 1)
             while t in rated: t = np.random.randint(1, itemnum + 1)
             item_idx.append(t)
 
         predictions = -model.predict(*[np.array(l) for l in [[u], [seq], item_idx]])
         predictions = predictions[0] # - for 1st argsort DESC
-
         rank = predictions.argsort().argsort()[0].item()
 
         valid_user += 1
 
-        if rank < 10:
+        if rank < 100:
             NDCG += 1 / np.log2(rank + 2)
             HT += 1
         if valid_user % 100 == 0:
