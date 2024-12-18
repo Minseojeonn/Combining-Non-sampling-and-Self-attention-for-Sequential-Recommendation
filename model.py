@@ -88,30 +88,41 @@ class SASRec(torch.nn.Module):
         return seqs
 
     def left(self, log_seqs):
-        F = self.log2feats(log_seqs)  # 사용자 시퀀스에 대한 특징 계산
-        FF = torch.bmm(F.permute(0, 2, 1), F)  # 배치 크기, 시퀀스 길이, hdim 형태로 배치별 특징 계산
-        E = self.item_emb.weight  # 아이템 임베딩 weight
-        EE = torch.mm(E.t(), E)  # 아이템 임베딩 간 내적 계산
-        CI_EE = 0.001 * EE  # 정규화 항 (아이템 간 내적에 대한 작은 가중치)
-        hh = self.prediction.weight * self.prediction.weight  # 예측 weight의 제곱
-        hh = hh.squeeze(0)  # 차원 축소
-        left = FF @ CI_EE @ hh  # 행렬 연산
-        left = left.sum(dim=1)  # 결과 합산
-        return left, F
-    
-    def right(self, pos_seqs, F):
-        pos_seqs = self.item_emb(torch.LongTensor(pos_seqs).to(self.dev))  # 포지티브 시퀀스 임베딩 계산
-        R_hat = torch.bmm(F, pos_seqs.permute(0, 2, 1))  # 배치, 시퀀스, hdim 형태로 배치별 계산
-        right = (1 - 0.001) * R_hat ** 2 - 2 * R_hat  # 손실 계산
-        right = right.sum(dim=2)  # 차원 합산
-        right = right.sum(dim=1)  # 최종 결과 합산
-        return right
-    
-    def forward(self, user_ids, log_seqs, pos_seqs):  # 학습을 위한 forward 함수
-        left, F = self.left(log_seqs)  # 'left' 부분 계산
-        right = self.right(pos_seqs, F)  # 'right' 부분 계산
-        loss = (left+right).sum(dim=0)  # 배치 크기에 대해 평균을 구함
+        F = self.log2feats(log_seqs)  # 사용자 시퀀스 특징
+        batch_size, seq_len, d = F.shape  # F: (batch_size, seq_len, d)
+
+        FF = torch.bmm(F.permute(0, 2, 1), F)  # F^a_t,k @ F^a_t,l -> (batch, d, d)
+        E = self.item_emb.weight  # 아이템 임베딩 (num_items, d)
+        EE = torch.mm(E.t(), E)  # E_i,k @ E_i,l -> (d, d)
+        c = 0.001  # 가중치 스칼라 값, 예시로 사용
+
+        hh = torch.matmul(self.prediction.weight.t(), self.prediction.weight) # h_k h_l -> (d,)
+        left = FF @ (c * EE) @ hh  # 계산 순서: FF @ EE @ hh
+        left = left.sum(dim=(1,2))  # 배치별로 합산
+
+        return left.mean()
+
+    def right(self, log_seqs, pos_seqs):
+        F = self.log2feats(log_seqs)
+        pos_seqs = self.item_emb(torch.LongTensor(pos_seqs).to(self.dev))  # 아이템 임베딩 (pos_seqs)
+        R_hat = F * pos_seqs  # R_hat: (batch, seq, seq)  # R_hat: (batch, seq)
+        R_hat = self.prediction(R_hat).squeeze(2)  # R_hat: (batch, seq, 1)
+        c = 0.001  # 가중치 스칼라 값
+        right = (1 - c) * (R_hat**2) - (2 * R_hat)  # 수식 그대로 적용
+        right = right.sum(dim=1)  # 배치별 합산
+        return right.mean()
+
+    def forward(self, user_ids, log_seqs, pos_seqs):
+        # 첫 번째 항 (left) 계산
+        left = self.left(log_seqs)
+
+        # 두 번째 항 (right) 계산
+        right = self.right(log_seqs, pos_seqs)
         
+        # 세 번째 항: 정규화
+        reg_loss = sum(torch.norm(param, p=2) for param in self.parameters())
+        # 최종 손실
+        loss = left + right + 0.0001 * reg_loss
         return loss
         
 
@@ -122,8 +133,8 @@ class SASRec(torch.nn.Module):
 
         item_embs = self.item_emb(torch.LongTensor(item_indices).to(self.dev)) # (U, I, C)
 
-        logits = item_embs.matmul(final_feat.unsqueeze(-1)).squeeze(-1)
-
+        logits = item_embs*final_feat
+        logits = self.prediction(logits)
         # preds = self.pos_sigmoid(logits) # rank same item list for different users
 
         return logits # preds # (U, I)
