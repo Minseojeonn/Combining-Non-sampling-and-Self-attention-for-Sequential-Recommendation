@@ -15,14 +15,14 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', required=True)
 parser.add_argument('--train_dir', required=True)
 parser.add_argument('--batch_size', default=128, type=int)
-parser.add_argument('--lr', default=0.001, type=float)
+parser.add_argument('--lr', default=0.01, type=float)
 parser.add_argument('--maxlen', default=200, type=int)
 parser.add_argument('--hidden_units', default=50, type=int)
 parser.add_argument('--num_blocks', default=1, type=int)
 parser.add_argument('--num_epochs', default=1000, type=int)
 parser.add_argument('--num_heads', default=1, type=int)
 parser.add_argument('--dropout_rate', default=0.2, type=float)
-parser.add_argument('--l2_emb', default=0.001, type=float)
+parser.add_argument('--l2_emb', default=0, type=float)
 parser.add_argument('--device', default='cuda', type=str)
 parser.add_argument('--inference_only', default=False, type=str2bool)
 parser.add_argument('--state_dict_path', default=None, type=str)
@@ -66,7 +66,7 @@ if __name__ == '__main__':
             pass # just ignore those failed init layers
 
     model.item_emb.weight.data[0, :] = 0
-    model.item_emb.weight.data[0, :] = 0
+    model.pos_emb.weight.data[0, :] = 0
 
     # this fails embedding init 'Embedding' object has no attribute 'dim'
     # model.apply(torch.nn.init.xavier_uniform_)

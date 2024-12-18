@@ -8,20 +8,14 @@ class PointWiseFeedForward(torch.nn.Module):
         super(PointWiseFeedForward, self).__init__()
 
         self.FC1 = torch.nn.Linear(hidden_units, hidden_units)
-        #self.LayerNorm = torch.nn.LayerNorm(hidden_units, eps=1e-8)
+        self.LayerNorm = torch.nn.LayerNorm(hidden_units, eps=1e-8)
         self.relu = torch.nn.ReLU()
         self.FC2 = torch.nn.Linear(hidden_units, hidden_units)
         self.LayerNorm2 = torch.nn.LayerNorm(hidden_units, eps=1e-8)
-        self.bias1 = torch.nn.Parameter(torch.zeros((1, hidden_units)))
-        self.bias2 = torch.nn.Parameter(torch.zeros((1, hidden_units)))
-        self.bias1 = torch.nn.init.xavier_normal_(self.bias1)
-        self.bias2 = torch.nn.init.xavier_normal_(self.bias2)
-        self.bias1.requires_grad = True
-        self.bias2.requires_grad = True
+        
         
     def forward(self, inputs):
-        outputs = self.relu(self.FC1(inputs)+self.bias1)
-        outputs = self.FC2(outputs) + self.bias2 + self.LayerNorm2(inputs) 
+        outputs = self.FC2(self.relu(self.FC1(self.LayerNorm(inputs)))) + self.LayerNorm2(inputs)
         
         return outputs
 
@@ -40,14 +34,15 @@ class SASRec(torch.nn.Module):
         # TODO: loss += args.l2_emb for regularizing embedding vectors during training
         # https://stackoverflow.com/questions/42704283/adding-l1-l2-regularization-in-pytorch
         self.item_emb = torch.nn.Embedding(self.item_num+1, args.hidden_units, padding_idx=0)
+        torch.nn.init.xavier_normal_(self.item_emb.weight)
         self.pos_emb = torch.nn.Embedding(args.maxlen+1, args.hidden_units, padding_idx=0)
         self.emb_dropout = torch.nn.Dropout(p=args.dropout_rate)
 
         self.attention_layernorms = torch.nn.ModuleList() # to be Q for self-attention
         self.attention_layers = torch.nn.ModuleList()
-        self.forward_layernorms = torch.nn.ModuleList()
+       
         self.forward_layers = torch.nn.ModuleList()
-        self.prediction = torch.nn.Linear(args.hidden_units, 1)
+        self.prediction = torch.nn.Linear(args.hidden_units, 1, bias=False)
         
         for _ in range(args.num_blocks):
             new_attn_layernorm = torch.nn.LayerNorm(args.hidden_units, eps=1e-8)
@@ -58,9 +53,6 @@ class SASRec(torch.nn.Module):
                                                             args.dropout_rate)
             self.attention_layers.append(new_attn_layer)
 
-            new_fwd_layernorm = torch.nn.LayerNorm(args.hidden_units, eps=1e-8)
-            self.forward_layernorms.append(new_fwd_layernorm)
-
             new_fwd_layer = PointWiseFeedForward(args.hidden_units, args.dropout_rate)
             self.forward_layers.append(new_fwd_layer)
 
@@ -68,11 +60,11 @@ class SASRec(torch.nn.Module):
     def log2feats(self, log_seqs): # TODO: fp64 and int64 as default in python, trim?
         seqs = self.item_emb(torch.LongTensor(log_seqs).to(self.dev))
         seqs *= self.item_emb.embedding_dim ** 0.5
+        seqs = self.emb_dropout(seqs)
         poss = np.tile(np.arange(1, log_seqs.shape[1] + 1), [log_seqs.shape[0], 1])
         # TODO: directly do tensor = torch.arange(1, xxx, device='cuda') to save extra overheads
         poss *= (log_seqs != 0)
         seqs += self.pos_emb(torch.LongTensor(poss).to(self.dev))
-        seqs = self.emb_dropout(seqs)
 
         tl = seqs.shape[1] # time dim len for enforce causality
         attention_mask = ~torch.tril(torch.ones((tl, tl), dtype=torch.bool, device=self.dev))
@@ -86,71 +78,71 @@ class SASRec(torch.nn.Module):
             seqs = Q + mha_outputs
             seqs = torch.transpose(seqs, 0, 1)
 
-            seqs = self.forward_layernorms[i](seqs)
+            #seqs = self.forward_layernorms[i](seqs)
             seqs = self.forward_layers[i](seqs)
 
         return seqs
     def reg_loss(self):
-        l2_reg = self.item_emb.weight.norm(2)
+        # 정규화 손실 계산
+        l2_reg = 0
+        for param in self.parameters():
+            l2_reg += torch.norm(param)
         return l2_reg
-    def left(self, log_seqs):
-        F = self.log2feats(log_seqs)  # 사용자 시퀀스 특징
+    
+    def left(self, F):
+          # 사용자 시퀀스 특징
         batch_size, seq_len, d = F.shape  # F: (batch_size, seq_len, d)
         FF = F.unsqueeze(2) * F.unsqueeze(3)
         FF = FF.sum(dim=1)
-        E = self.item_emb.weight  # 아이템 임베딩 (num_items, d)
-        EE = E.unsqueeze(2) * E.unsqueeze(1)  # E_i,k @ E_i,l -> (d, d)
-        EE = EE.sum(dim=0)  # sum over items
+        
+        item_sum = torch.bmm(
+            self.item_emb.weight.unsqueeze(2),
+            self.item_emb.weight.unsqueeze(1),
+            ).sum(dim=0)  # E_i,k @ E_i,l -> (d, d)
+        
         c = 0.001  # 가중치 스칼라 값, 예시로 사용
-        cEE = c * EE 
+        cEE = c * item_sum 
         
         hh = torch.matmul(self.prediction.weight.t(), self.prediction.weight) 
-        left = FF @ (cEE) @ hh  # 계산 순서: FF @ EE @ hh
-        left = left.sum(dim=-1)
-        left = left.sum(dim=-1)
-        #left == (batch_size,1)
-        return left, F
+        left = torch.sum(FF * (cEE) * hh)  # 계산 순서: FF @ EE @ hh
+        return left
 
-    def right(self, F, pos_seqs): #batch, seq, dim
-        pos_seqs = self.item_emb(torch.LongTensor(pos_seqs).to(self.dev))  # 아이템 임베딩 (pos_seqs)
-        
-        pu = F.transpose(1, 2)
-        qi = pos_seqs.transpose(1, 2)
-        ht = self.prediction.weight
-        R_hat = ht @ (pu * qi)
+    def right(self, pos_socre): #batch, seq, dim 
         c = 0.001  # 가중치 스칼라 값
-        right = (1 - c) * (R_hat**2) - (2 * R_hat)  # 수식 그대로 적용
-        right = right.sum(dim=-1)
-        right = right.sum(dim=-1)
-        return right
+        right = (1 - c) * torch.square(pos_socre) - (2 * pos_socre)  # 수식 그대로 적용
+        
+        return torch.sum(right)
 
     def forward(self, user_ids, log_seqs, pos_seqs):
         # 첫 번째 항 (left) 계산
-        left, F = self.left(log_seqs)
+        log_feats = self.log2feats(log_seqs)
+        left = self.left(log_feats)
 
+        pos_score = self.item_emb(torch.LongTensor(pos_seqs).to(self.dev))
+        pos_score = self.prediction(log_feats * pos_score)
         # 두 번째 항 (right) 계산
-        right = self.right(F, pos_seqs)
+        right = self.right(pos_score)
         loss = left + right
         #loss = loss.mean()
         # 세 번째 항: 정규화
         reg_loss = self.reg_loss()
         # 최종 손실
-        loss = loss + 0.01 * reg_loss
-        return loss.mean()
+        loss = loss + 0.1 * reg_loss
+        
+        return loss
         
 
     def predict(self, user_ids, log_seqs, item_indices): # for inference
         log_feats = self.log2feats(log_seqs) # user_ids hasn't been used yet
         final_feat = log_feats[:, -1, :] # only use last QKV classifier, a waste
         item_embs = self.item_emb(torch.LongTensor(item_indices).to(self.dev)) # (U, I, C)
-        pu = final_feat.t()
-        qi = item_embs.t()
-        ht = self.prediction.weight
+        pu = final_feat
+        qi = item_embs
         
-        R_hat = ht @ (pu * qi)
+        R_hat = self.prediction(pu * qi)
         #logits = item_embs*final_feat
         #logits = self.prediction(logits).squeeze(1).unsqueeze(0) # (U, I) #
 
         # preds = self.pos_sigmoid(logits) # rank same item list for different users
 
-        return R_hat # preds # (U, I)
+        return R_hat.t() # preds # (U, I)
