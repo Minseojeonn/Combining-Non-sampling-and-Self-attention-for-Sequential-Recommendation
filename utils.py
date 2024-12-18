@@ -38,7 +38,6 @@ def sample_function(user_train, usernum, itemnum, batch_size, maxlen, result_que
 
         seq = np.zeros([maxlen], dtype=np.int32)
         pos = np.zeros([maxlen], dtype=np.int32)
-        neg = np.zeros([maxlen], dtype=np.int32)
         nxt = user_train[uid][-1]
         idx = maxlen - 1
 
@@ -46,12 +45,11 @@ def sample_function(user_train, usernum, itemnum, batch_size, maxlen, result_que
         for i in reversed(user_train[uid][:-1]):
             seq[idx] = i
             pos[idx] = nxt
-            if nxt != 0: neg[idx] = random_neq(1, itemnum + 1, ts)
             nxt = i
             idx -= 1
             if idx == -1: break
 
-        return (uid, seq, pos, neg)
+        return (uid, seq, pos)
 
     np.random.seed(SEED)
     uids = np.arange(1, usernum+1, dtype=np.int32)

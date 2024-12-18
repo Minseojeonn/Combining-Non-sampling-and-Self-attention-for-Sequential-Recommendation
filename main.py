@@ -18,7 +18,7 @@ parser.add_argument('--batch_size', default=128, type=int)
 parser.add_argument('--lr', default=0.001, type=float)
 parser.add_argument('--maxlen', default=200, type=int)
 parser.add_argument('--hidden_units', default=50, type=int)
-parser.add_argument('--num_blocks', default=2, type=int)
+parser.add_argument('--num_blocks', default=1, type=int)
 parser.add_argument('--num_epochs', default=1000, type=int)
 parser.add_argument('--num_heads', default=1, type=int)
 parser.add_argument('--dropout_rate', default=0.2, type=float)
@@ -27,7 +27,12 @@ parser.add_argument('--device', default='cuda', type=str)
 parser.add_argument('--inference_only', default=False, type=str2bool)
 parser.add_argument('--state_dict_path', default=None, type=str)
 
+#예외처리 코드
+
+
 args = parser.parse_args()
+if args.num_blocks != 1:
+    raise ValueError('num_blocks should be 1')
 if not os.path.isdir(args.dataset + '_' + args.train_dir):
     os.makedirs(args.dataset + '_' + args.train_dir)
 with open(os.path.join(args.dataset + '_' + args.train_dir, 'args.txt'), 'w') as f:
@@ -99,15 +104,10 @@ if __name__ == '__main__':
     for epoch in range(epoch_start_idx, args.num_epochs + 1):
         if args.inference_only: break # just to decrease identition
         for step in range(num_batch): # tqdm(range(num_batch), total=num_batch, ncols=70, leave=False, unit='b'):
-            u, seq, pos, neg = sampler.next_batch() # tuples to ndarray
-            u, seq, pos, neg = np.array(u), np.array(seq), np.array(pos), np.array(neg)
-            pos_logits, neg_logits = model(u, seq, pos, neg)
-            pos_labels, neg_labels = torch.ones(pos_logits.shape, device=args.device), torch.zeros(neg_logits.shape, device=args.device)
-            # print("\neye ball check raw_logits:"); print(pos_logits); print(neg_logits) # check pos_logits > 0, neg_logits < 0
+            u, seq, pos= sampler.next_batch() # tuples to ndarray
+            u, seq, pos = np.array(u), np.array(seq), np.array(pos) #seq = query, pos = answer e.g) seq[t] = pos[t-1] 
             adam_optimizer.zero_grad()
-            indices = np.where(pos != 0)
-            loss = bce_criterion(pos_logits[indices], pos_labels[indices])
-            loss += bce_criterion(neg_logits[indices], neg_labels[indices])
+            loss = model(u, seq, pos)
             for param in model.item_emb.parameters(): loss += args.l2_emb * torch.norm(param)
             loss.backward()
             adam_optimizer.step()

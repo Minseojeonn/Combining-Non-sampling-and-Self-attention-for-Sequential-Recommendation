@@ -41,9 +41,8 @@ class SASRec(torch.nn.Module):
         self.attention_layers = torch.nn.ModuleList()
         self.forward_layernorms = torch.nn.ModuleList()
         self.forward_layers = torch.nn.ModuleList()
-
-        self.last_layernorm = torch.nn.LayerNorm(args.hidden_units, eps=1e-8)
-
+        self.prediction = torch.nn.Linear(args.hidden_units, 1)
+        
         for _ in range(args.num_blocks):
             new_attn_layernorm = torch.nn.LayerNorm(args.hidden_units, eps=1e-8)
             self.attention_layernorms.append(new_attn_layernorm)
@@ -64,7 +63,7 @@ class SASRec(torch.nn.Module):
 
     def log2feats(self, log_seqs): # TODO: fp64 and int64 as default in python, trim?
         seqs = self.item_emb(torch.LongTensor(log_seqs).to(self.dev))
-        seqs *= self.item_emb.embedding_dim ** 0.5
+        #seqs *= self.item_emb.embedding_dim ** 0.5
         poss = np.tile(np.arange(1, log_seqs.shape[1] + 1), [log_seqs.shape[0], 1])
         # TODO: directly do tensor = torch.arange(1, xxx, device='cuda') to save extra overheads
         poss *= (log_seqs != 0)
@@ -86,23 +85,35 @@ class SASRec(torch.nn.Module):
             seqs = self.forward_layernorms[i](seqs)
             seqs = self.forward_layers[i](seqs)
 
-        log_feats = self.last_layernorm(seqs) # (U, T, C) -> (U, -1, C)
+        return seqs
 
-        return log_feats
-
-    def forward(self, user_ids, log_seqs, pos_seqs, neg_seqs): # for training        
-        log_feats = self.log2feats(log_seqs) # user_ids hasn't been used yet
-
-        pos_embs = self.item_emb(torch.LongTensor(pos_seqs).to(self.dev))
-        neg_embs = self.item_emb(torch.LongTensor(neg_seqs).to(self.dev))
-
-        pos_logits = (log_feats * pos_embs).sum(dim=-1)
-        neg_logits = (log_feats * neg_embs).sum(dim=-1)
-
-        # pos_pred = self.pos_sigmoid(pos_logits)
-        # neg_pred = self.neg_sigmoid(neg_logits)
-
-        return pos_logits, neg_logits # pos_pred, neg_pred
+    def left(self, log_seqs):
+        F = self.log2feats(log_seqs)  # 사용자 시퀀스에 대한 특징 계산
+        FF = torch.bmm(F.permute(0, 2, 1), F)  # 배치 크기, 시퀀스 길이, hdim 형태로 배치별 특징 계산
+        E = self.item_emb.weight  # 아이템 임베딩 weight
+        EE = torch.mm(E.t(), E)  # 아이템 임베딩 간 내적 계산
+        CI_EE = 0.001 * EE  # 정규화 항 (아이템 간 내적에 대한 작은 가중치)
+        hh = self.prediction.weight * self.prediction.weight  # 예측 weight의 제곱
+        hh = hh.squeeze(0)  # 차원 축소
+        left = FF @ CI_EE @ hh  # 행렬 연산
+        left = left.sum(dim=1)  # 결과 합산
+        return left, F
+    
+    def right(self, pos_seqs, F):
+        pos_seqs = self.item_emb(torch.LongTensor(pos_seqs).to(self.dev))  # 포지티브 시퀀스 임베딩 계산
+        R_hat = torch.bmm(F, pos_seqs.permute(0, 2, 1))  # 배치, 시퀀스, hdim 형태로 배치별 계산
+        right = (1 - 0.001) * R_hat ** 2 - 2 * R_hat  # 손실 계산
+        right = right.sum(dim=2)  # 차원 합산
+        right = right.sum(dim=1)  # 최종 결과 합산
+        return right
+    
+    def forward(self, user_ids, log_seqs, pos_seqs):  # 학습을 위한 forward 함수
+        left, F = self.left(log_seqs)  # 'left' 부분 계산
+        right = self.right(pos_seqs, F)  # 'right' 부분 계산
+        loss = (left+right).sum(dim=0)  # 배치 크기에 대해 평균을 구함
+        
+        return loss
+        
 
     def predict(self, user_ids, log_seqs, item_indices): # for inference
         log_feats = self.log2feats(log_seqs) # user_ids hasn't been used yet
